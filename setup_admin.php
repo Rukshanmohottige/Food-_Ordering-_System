@@ -1,49 +1,77 @@
 <?php
-include "config/database.php";
+declare(strict_types=1);
 
-// Delete old admin accounts
-$conn->query("DELETE FROM users WHERE email IN ('admin@canteen.com', 'staff@canteen.com') AND user_role IN ('admin', 'staff')");
+require_once __DIR__ . '/config/database.php';
+require_once __DIR__ . '/includes/bootstrap.php';
 
-// Hash the password: admin123
-$password = hash('sha256', 'admin123');
+// Security guard: prevent resetting or creating admin accounts once an admin already exists.
+$adminCount = (int) ($conn->query("SELECT COUNT(*) AS cnt FROM users WHERE user_role = 'admin'")->fetch_assoc()['cnt'] ?? 0);
 
-// Create admin user
-$stmt = $conn->prepare("INSERT INTO users (name, email, password, user_role, created_at) VALUES (?, ?, ?, ?, NOW())");
-$name_admin = 'Admin User';
-$email_admin = 'admin@canteen.com';
-$role_admin = 'admin';
-$stmt->bind_param('ssss', $name_admin, $email_admin, $password, $role_admin);
-$stmt->execute();
+if ($adminCount > 0 && PHP_SAPI !== 'cli') {
+    http_response_code(403);
+    echo '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Setup Locked</title>';
+    echo '<link rel="stylesheet" href="' . e(app_url('assets/css/style.css')) . '"></head><body><main class="container page-main"><div class="card auth-card">';
+    echo '<h2>Setup Already Completed</h2>';
+    echo '<p>An administrator account already exists. For security, this setup script is locked.</p>';
+    echo '<a class="btn btn-primary" href="' . e(app_url('admin/login.php')) . '">Go to Admin Login</a>';
+    echo '</div></main></body></html>';
+    exit;
+}
 
-// Create staff user
-$stmt = $conn->prepare("INSERT INTO users (name, email, password, user_role, created_at) VALUES (?, ?, ?, ?, NOW())");
-$name_staff = 'Staff User';
-$email_staff = 'staff@canteen.com';
-$role_staff = 'staff';
-$stmt->bind_param('ssss', $name_staff, $email_staff, $password, $role_staff);
-$stmt->execute();
+$created = [];
 
-echo "<h2 style='color: green;'>✓ Admin accounts created successfully!</h2>";
-echo "<hr>";
-echo "<h3>Login Credentials:</h3>";
-echo "<table style='border-collapse: collapse; width: 100%;'>";
-echo "<tr style='background: #f0f0f0;'>";
-echo "<td style='border: 1px solid #ddd; padding: 10px;'><strong>Role</strong></td>";
-echo "<td style='border: 1px solid #ddd; padding: 10px;'><strong>Email</strong></td>";
-echo "<td style='border: 1px solid #ddd; padding: 10px;'><strong>Password</strong></td>";
-echo "</tr>";
-echo "<tr>";
-echo "<td style='border: 1px solid #ddd; padding: 10px;'>Admin</td>";
-echo "<td style='border: 1px solid #ddd; padding: 10px;'>admin@canteen.com</td>";
-echo "<td style='border: 1px solid #ddd; padding: 10px;'>admin123</td>";
-echo "</tr>";
-echo "<tr>";
-echo "<td style='border: 1px solid #ddd; padding: 10px;'>Staff</td>";
-echo "<td style='border: 1px solid #ddd; padding: 10px;'>staff@canteen.com</td>";
-echo "<td style='border: 1px solid #ddd; padding: 10px;'>admin123</td>";
-echo "</tr>";
-echo "</table>";
-echo "<hr>";
-echo "<p><strong>⚠️ IMPORTANT:</strong> Delete this file after setup!</p>";
-echo "<p><a href='admin/login.php' style='display: inline-block; padding: 10px 20px; background: #007bff; color: white; text-decoration: none; border-radius: 5px;'>Go to Admin Login</a></p>";
+$defaults = [
+    ['Admin User', 'admin@canteen.com', 'admin123', 'admin'],
+    ['Staff User', 'staff@canteen.com', 'admin123', 'staff'],
+    ['Student Demo', 'student@canteen.com', 'student123', 'student'],
+];
+
+foreach ($defaults as [$name, $email, $plainPass, $role]) {
+    $check = $conn->prepare('SELECT user_id FROM users WHERE email = ? LIMIT 1');
+    $check->bind_param('s', $email);
+    $check->execute();
+    $exists = $check->get_result()->num_rows > 0;
+    $check->close();
+
+    if (!$exists) {
+        $passHash = hash_password($plainPass);
+        $ins = $conn->prepare('INSERT INTO users (name, email, password, user_role) VALUES (?, ?, ?, ?)');
+        $ins->bind_param('ssss', $name, $email, $passHash, $role);
+        $ins->execute();
+        $ins->close();
+        $created[] = [$role, $email];
+    }
+}
+
+if (PHP_SAPI === 'cli') {
+    echo empty($created) ? "Default accounts already exist.\n" : "Initial admin/staff accounts created.\n";
+    exit;
+}
 ?>
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Initial Admin Setup</title>
+  <link rel="stylesheet" href="<?php echo e(app_url('assets/css/style.css')); ?>">
+</head>
+<body>
+<main class="container page-main">
+  <div class="card auth-card">
+    <h2 style="margin-top:0;color:var(--success);">Initial Setup Complete</h2>
+    <?php if (empty($created)): ?>
+      <p>Default accounts already exist in the database.</p>
+    <?php else: ?>
+      <p>Created initial accounts (change the default password after logging in):</p>
+      <ul>
+        <li><strong>Admin:</strong> admin@canteen.com / <code>admin123</code></li>
+        <li><strong>Staff:</strong> staff@canteen.com / <code>admin123</code></li>
+        <li><strong>Student Demo:</strong> student@canteen.com / <code>student123</code></li>
+      </ul>
+    <?php endif; ?>
+    <p class="muted">You may also delete <code>setup_admin.php</code> after setup.</p>
+    <a class="btn btn-primary" href="<?php echo e(app_url('admin/login.php')); ?>">Go to Admin Login</a>
+  </div>
+</main>
+</body>
+</html>

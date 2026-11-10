@@ -1,72 +1,115 @@
 <?php
-session_start();
-include "../config/database.php";
+declare(strict_types=1);
 
-// Require login
-if (!isset($_SESSION['user_id'])) {
-    header("Location: ../public/login.php");
-    exit;
+require_once __DIR__ . '/../config/database.php';
+require_once __DIR__ . '/../includes/auth.php';
+
+ensure_logged_in();
+require_valid_post('public/cart.php');
+
+$userId = current_user_id();
+$mode = (string) ($_POST['mode'] ?? '');
+$takeOption = in_array($_POST['take_option'] ?? '', ['takeaway', 'dine-in'], true)
+    ? (string) $_POST['take_option']
+    : 'takeaway';
+$notes = mb_substr(trim((string) ($_POST['notes'] ?? '')), 0, 255);
+
+// Determine items to order: full session cart OR direct single-item submission
+$requestedItems = [];
+if ($mode === 'cart') {
+    $requestedItems = cart_items();
+} elseif (isset($_POST['item_id'])) {
+    $itemId = (int) $_POST['item_id'];
+    $qty = (int) ($_POST['quantity'] ?? 1);
+    if ($itemId > 0 && $qty >= 1 && $qty <= 50) {
+        $requestedItems[$itemId] = $qty;
+    }
+} else {
+    $requestedItems = cart_items();
 }
 
-$user_id = $_SESSION['user_id'];
-$item_id = intval($_POST['item_id'] ?? 0);
-$qty = intval($_POST['quantity'] ?? 1);
-$take_option = in_array($_POST['take_option'] ?? '', ['takeaway','dine-in']) 
-                ? $_POST['take_option'] 
-                : 'takeaway';
+if (empty($requestedItems)) {
+    set_flash('warning', 'Your cart is empty or invalid quantity was provided.');
+    redirect_to('public/menu.php');
+}
 
-// Fetch item price
-$stmt = $conn->prepare("SELECT price FROM menu_items WHERE item_id=? AND is_available=1 LIMIT 1");
-$stmt->bind_param("i", $item_id);
+$ids = array_keys($requestedItems);
+$placeholders = implode(',', array_fill(0, count($ids), '?'));
+$types = str_repeat('i', count($ids));
+
+$stmt = $conn->prepare("SELECT item_id, name, price, prep_minutes, is_available FROM menu_items WHERE item_id IN ($placeholders)");
+$stmt->bind_param($types, ...$ids);
 $stmt->execute();
 $res = $stmt->get_result();
+$dbItems = [];
+while ($row = $res->fetch_assoc()) {
+    $dbItems[(int) $row['item_id']] = $row;
+}
+$stmt->close();
 
-if ($res->num_rows == 0) {
-    die("Item not available");
+$orderLines = [];
+$totalAmount = 0.0;
+$prepTime = 5;
+$totalQty = 0;
+
+foreach ($requestedItems as $itemId => $qty) {
+    if ($qty < 1 || $qty > 50 || !isset($dbItems[$itemId]) || (int) $dbItems[$itemId]['is_available'] !== 1) {
+        set_flash('error', 'One or more selected items are no longer available. Please review your cart.');
+        redirect_to('public/cart.php');
+    }
+    $item = $dbItems[$itemId];
+    $price = (float) $item['price'];
+    $totalAmount += $price * $qty;
+    $totalQty += $qty;
+    $prepTime = max($prepTime, (int) ($item['prep_minutes'] ?? 10));
+    $orderLines[] = [
+        'item_id' => $itemId,
+        'quantity' => $qty,
+        'price' => $price,
+    ];
 }
 
-$row = $res->fetch_assoc();
-$price = $row['price'];
-$total = $price * $qty;
-
-// Create order
-$stmt = $conn->prepare("
-    INSERT INTO orders (user_id, total_amount, status, take_option, preparation_time)
-    VALUES (?, ?, ?, ?, ?)
-");
-
-// FIX: define status BEFORE bind_param
-$status = "pending";
-
-// preparation time logic
-$prep = ($qty > 5) ? 25 : 10;
-
-$stmt->bind_param("idssi", $user_id, $total, $status, $take_option, $prep);
-
-if (!$stmt->execute()) {
-    die("Order create error: " . $stmt->error);
+if ($totalQty > 5) {
+    $prepTime = max($prepTime, 20);
 }
 
-$order_id = $stmt->insert_id;
+$conn->begin_transaction();
 
-// Insert order items
-$stmt2 = $conn->prepare("
-    INSERT INTO order_items (order_id, item_id, quantity, price)
-    VALUES (?, ?, ?, ?)
-");
-$stmt2->bind_param("iiid", $order_id, $item_id, $qty, $price);
-$stmt2->execute();
+try {
+    $status = 'pending';
+    $notesParam = $notes !== '' ? $notes : null;
 
-// Add notification
-$msg = "Your order #$order_id has been placed.";
-$stmt3 = $conn->prepare("
-    INSERT INTO notifications (user_id, message, is_read)
-    VALUES (?, ?, 0)
-");
-$stmt3->bind_param("is", $user_id, $msg);
-$stmt3->execute();
+    $orderStmt = $conn->prepare(
+        'INSERT INTO orders (user_id, total_amount, status, take_option, preparation_time, notes) VALUES (?, ?, ?, ?, ?, ?)'
+    );
+    $orderStmt->bind_param('idssis', $userId, $totalAmount, $status, $takeOption, $prepTime, $notesParam);
+    $orderStmt->execute();
+    $orderId = (int) $orderStmt->insert_id;
+    $orderStmt->close();
 
-// Redirect to order page
-header("Location: ../public/order.php?id=" . $order_id);
-exit;
-?>
+    $lineStmt = $conn->prepare('INSERT INTO order_items (order_id, item_id, quantity, price) VALUES (?, ?, ?, ?)');
+    foreach ($orderLines as $line) {
+        $lineStmt->bind_param('iiid', $orderId, $line['item_id'], $line['quantity'], $line['price']);
+        $lineStmt->execute();
+    }
+    $lineStmt->close();
+
+    $msg = "Your order #$orderId (" . format_currency($totalAmount) . ') has been placed and is pending confirmation.';
+    $notifStmt = $conn->prepare('INSERT INTO notifications (user_id, message, is_read) VALUES (?, ?, 0)');
+    $notifStmt->bind_param('is', $userId, $msg);
+    $notifStmt->execute();
+    $notifStmt->close();
+
+    $conn->commit();
+} catch (Throwable $e) {
+    $conn->rollback();
+    set_flash('error', 'Could not place your order right now. Please try again.');
+    redirect_to('public/cart.php');
+}
+
+if ($mode === 'cart' || !isset($_POST['item_id'])) {
+    cart_clear();
+}
+
+set_flash('success', "Order #$orderId placed successfully!");
+redirect_to('public/order.php?id=' . $orderId);
