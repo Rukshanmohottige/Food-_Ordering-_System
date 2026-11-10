@@ -1,6 +1,7 @@
 <?php
 declare(strict_types=1);
 
+// Default local XAMPP settings (or create config/db_production.php on live hosting)
 $host = getenv('DB_HOST') ?: 'localhost';
 $user = getenv('DB_USER') ?: 'root';
 $pass = getenv('DB_PASS');
@@ -8,6 +9,16 @@ if ($pass === false) {
     $pass = ''; // XAMPP default
 }
 $db = getenv('DB_NAME') ?: 'food_ordering_system';
+
+if (file_exists(__DIR__ . '/db_production.php')) {
+    $prod = require __DIR__ . '/db_production.php';
+    if (is_array($prod)) {
+        $host = (string) ($prod['host'] ?? $host);
+        $user = (string) ($prod['user'] ?? $user);
+        $pass = (string) ($prod['pass'] ?? $pass);
+        $db   = (string) ($prod['db'] ?? $db);
+    }
+}
 
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 

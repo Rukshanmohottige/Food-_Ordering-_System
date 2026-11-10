@@ -4,9 +4,10 @@ Thumbs.db
 .vscode/
 .idea/
 
-# Environment / local overrides
+# Environment / local production overrides
 .env
 *.log
+config/db_production.php
 
 # Raw uploaded photo (served from assets/images/canteen-bg.jpg)
 45501333712_9e8c04bbb7_c.jpg

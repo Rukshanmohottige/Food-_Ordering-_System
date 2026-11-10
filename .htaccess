@@ -1,0 +1,11 @@
+DirectoryIndex index.php
+Options -Indexes
+
+<FilesMatch "\.(sql|md|log|env|gitignore)$">
+    Require all denied
+</FilesMatch>
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteRule ^\.git - [F,L]
+</IfModule>
